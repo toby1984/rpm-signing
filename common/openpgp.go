@@ -51,7 +51,7 @@ type KeyType struct {
 var (
 	KEY_TYPE_RSA   = KeyType{1, "RSA"}
 	KEY_TYPE_DSA   = KeyType{2, "DSA"}
-	KEY_TYPE_OTHER = KeyType{2, "other key type"}
+	KEY_TYPE_OTHER = KeyType{3, "other key type"}
 )
 
 func GetKeyType(privateKey packet.PrivateKey) KeyType {
@@ -167,12 +167,15 @@ func VerifySignature(pubKeyRing openpgp.EntityList, signedData []byte, signature
 	return signerEntity, nil
 }
 
-// SignDigest signs the provided digest using an RSA private key
-// and returns the raw binary OpenPGP signature packet for RPMSIGTAG_RSA.
+// SignDigest signs the provided digest using an RSA or DSA private key and returns
+// the raw binary OpenPGP signature packet. The caller stores it in RPMSIGTAG_RSA
+// (tag 268) for an RSA key and in RPMSIGTAG_DSA (tag 267) for a DSA key.
 func SignDigest(digest hash.Hash, privKey *packet.PrivateKey) ([]byte, error) {
 
-	if privKey.PubKeyAlgo != packet.PubKeyAlgoRSA {
-		return nil, fmt.Errorf("tag 268 requires an RSA key, got algorithm ID: %d", privKey.PubKeyAlgo)
+	// the accepted key types have to stay in sync with SignRpm(), which is what
+	// picks the signature header tag the resulting packet ends up in
+	if keyType := GetKeyType(*privKey); keyType != KEY_TYPE_RSA && keyType != KEY_TYPE_DSA {
+		return nil, fmt.Errorf("signing requires an RSA or DSA key, got algorithm ID: %d", privKey.PubKeyAlgo)
 	}
 
 	/*
@@ -206,10 +209,12 @@ func SignDigest(digest hash.Hash, privKey *packet.PrivateKey) ([]byte, error) {
 
 	// 1. Construct the Version 4 OpenPGP Signature Packet metadata
 	sig := &packet.Signature{
-		Version:      4,
-		SigType:      packet.SigTypeBinary,
-		PubKeyAlgo:   packet.PubKeyAlgoRSA,
-		Hash:         crypto.SHA256, // Modern RPM expects SHA-256
+		Version:    4,
+		SigType:    packet.SigTypeBinary,
+		PubKeyAlgo: privKey.PubKeyAlgo, // has to match the key, it selects the signing algorithm
+		Hash:       crypto.SHA256,      // Modern RPM expects SHA-256
+		// DSA truncates the digest to its subgroup size, so SHA-256 is signed
+		// in full by a key with a 256 bit q and truncated by a smaller one
 		CreationTime: privKey.CreationTime,
 		IssuerKeyId:  &privKey.KeyId,
 	}
