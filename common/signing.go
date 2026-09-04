@@ -147,9 +147,12 @@ func (v *SignatureVerifierImpl) VerifyV3Signature() error {
 
 func (v *SignatureVerifierImpl) VerifyV4Signature() error {
 
-	rsaTag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagRSAHeader)
-	if rsaTag == nil {
-		return errors.New("Signature header does not contain a SigTagRSAHeader tag")
+	// a V4 signature covers the main header only, RSA keys store it in
+	// RPMSIGTAG_RSA (tag 268) and DSA keys in RPMSIGTAG_DSA (tag 267)
+	rsaHeaderTag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagRSAHeader)
+	dsaHeaderTag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagDSAHeader)
+	if rsaHeaderTag == nil && dsaHeaderTag == nil {
+		return errors.New("Signature header contains neither a SigTagRSAHeader nor a SigTagDSAHeader tag")
 	}
 
 	dsaTag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagGPG)
@@ -165,10 +168,18 @@ func (v *SignatureVerifierImpl) VerifyV4Signature() error {
 		return err
 	}
 
-	// verify RPMSIGTAG_PGP
-	_, err = VerifySignature(v.gpgPublicKeys, headerData, rsaTag.payload)
-	if err != nil {
-		return err
+	// verify RPMSIGTAG_RSA
+	if rsaHeaderTag != nil {
+		if _, err = VerifySignature(v.gpgPublicKeys, headerData, rsaHeaderTag.payload); err != nil {
+			return err
+		}
+	}
+
+	// verify RPMSIGTAG_DSA
+	if dsaHeaderTag != nil {
+		if _, err = VerifySignature(v.gpgPublicKeys, headerData, dsaHeaderTag.payload); err != nil {
+			return err
+		}
 	}
 
 	// verify RPMSIGTAG_GPG
