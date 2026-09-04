@@ -572,7 +572,8 @@ func (header *RpmHeader) DeleteIndexEntry(entry IndexEntry) {
 			header.IndexEntries = RemoveAtIndex(header.IndexEntries, idx)
 			header.indexEntryCount--
 			header.updateSignedRegionTrailer()
-			header.recalcStoreSize()
+			// the removed entry leaves a hole in the data store, close it again
+			header.syncDataStoreLayout()
 			return
 		}
 	}
@@ -585,10 +586,17 @@ func (header *RpmHeader) FindNextSuitablePayloadOffset(format FormatType) uint32
 
 	// >>> Do not change allocation semantics, calling code relies on the fact
 	// that the returned offset is at the very end of the data store <<<
+	trailer := header.regionTrailerEntry()
 	var entryWithLargestOffset *IndexEntry
-	for _, e := range header.IndexEntries {
+	for idx := range header.IndexEntries {
+		e := &header.IndexEntries[idx]
+		if e == trailer {
+			// the region trailer is kept at the end of the data store by
+			// syncDataStoreLayout(), allocating behind it would bury it
+			continue
+		}
 		if entryWithLargestOffset == nil || e.offset > entryWithLargestOffset.offset {
-			entryWithLargestOffset = &e
+			entryWithLargestOffset = e
 		}
 	}
 	payloadOffset := uint32(0)
@@ -696,10 +704,10 @@ func (header *RpmHeader) allocateSpaceInDatastore(requestedSize uint32, format F
 		dataItemCnt:       reservedSize,
 		payload:           make([]byte, reservedSize),
 	}
-	// appended directly: addIndexEntry() would call back into this method to find an
+	// inserted directly: addIndexEntry() would call back into this method to find an
 	// offset, and as there still would be no reserved space to allocate from at that
 	// point it would recurse indefinitely
-	header.appendIndexEntry(*reservedSpace)
+	header.insertIndexEntry(*reservedSpace)
 	return header.allocateSpaceInDatastore(requestedSize, format)
 }
 
@@ -711,31 +719,79 @@ func (header *RpmHeader) addIndexEntry(newEntry IndexEntry) {
 
 	newEntry.offset = header.allocateSpaceInDatastore(uint32(len(newEntry.payload)), FormatType(newEntry.formatType))
 
-	header.appendIndexEntry(newEntry)
+	header.insertIndexEntry(newEntry)
 }
 
-// appendIndexEntry adds an index entry whose data store offset has already been
-// determined and brings the header's derived fields back in sync.
-func (header *RpmHeader) appendIndexEntry(newEntry IndexEntry) {
+// insertIndexEntry adds an index entry whose data store offset has already been
+// determined and brings the header's derived fields back in sync. The entry is
+// inserted so the index entries stay sorted by tag number, which is the order the
+// RPM header format requires them in. Sorting by tag also keeps the region trailer
+// in the first slot, as its tag is the lowest one a header can carry.
+func (header *RpmHeader) insertIndexEntry(newEntry IndexEntry) {
 
-	header.IndexEntries = append(header.IndexEntries, newEntry)
-	header.indexEntryCount++
-	header.updateSignedRegionTrailer()
-	header.recalcStoreSize()
-}
-
-// recalcStoreSize recalculates the size of this header's data store. The store ends
-// with whichever index entry reaches furthest into it, which is exactly the number of
-// data store bytes Write() emits.
-func (header *RpmHeader) recalcStoreSize() {
-
-	storeSize := uint32(0)
+	// linear scan rather than a binary search: headers carry few entries and a
+	// header that was written by a tool that did not sort them must not throw
+	// this off any further
+	insertAt := len(header.IndexEntries)
 	for idx := range header.IndexEntries {
-		if endOffset := header.IndexEntries[idx].endOffset(); endOffset > storeSize {
-			storeSize = endOffset
+		if header.IndexEntries[idx].tag > newEntry.tag {
+			insertAt = idx
+			break
 		}
 	}
-	header.storeSizeInBytes = storeSize
+	header.IndexEntries = slices.Insert(header.IndexEntries, insertAt, newEntry)
+	header.indexEntryCount++
+	header.updateSignedRegionTrailer()
+	// the entry was allocated space at the end of the data store while its index
+	// entry went somewhere in the middle, so the data has to be laid out again
+	header.syncDataStoreLayout()
+}
+
+// regionTrailerEntry returns this header's region trailer index entry, or nil if the
+// header has none. The trailer is the one entry that does not follow index entry
+// order: it stays the FIRST index entry while its 16 bytes of data occupy the very
+// END of the data store, because rpm requires the region to span the whole store.
+func (header *RpmHeader) regionTrailerEntry() *IndexEntry {
+
+	if header.IsMainHeader {
+		return header.FindIndexEntry(TagHeaderImmutable)
+	}
+	return header.FindIndexEntry(SigTagHeaderSignatures)
+}
+
+// syncDataStoreLayout re-assigns every index entry's data store offset so the data is
+// laid out in index entry order, each entry aligned as its format type requires, and
+// updates the store size to match. The region trailer is excluded and placed last.
+//
+// rpm walks the index entries in order and rejects a header as soon as an entry's
+// data starts before the end of the previous entry's data ("Previous data must not
+// overlap" in hdrblobVerifyInfo()), so index entry order and data store order have to
+// stay in lock-step. Re-placing the data rather than re-sorting the index entries is
+// what keeps them sorted by tag number, which is the order the header format documents.
+//
+// This is a no-op for a header that was parsed and not modified afterwards, as rpm
+// packs the data store exactly the same way.
+func (header *RpmHeader) syncDataStoreLayout() {
+
+	trailer := header.regionTrailerEntry()
+
+	nextOffset := uint32(0)
+	place := func(entry *IndexEntry) {
+		alignment := FormatType(entry.formatType).GetRequiredAlignment()
+		nextOffset += uint32(CalcAlignmentByteCount(uint64(nextOffset), alignment))
+		entry.offset = nextOffset
+		nextOffset += uint32(len(entry.payload))
+	}
+
+	for idx := range header.IndexEntries {
+		if entry := &header.IndexEntries[idx]; entry != trailer {
+			place(entry)
+		}
+	}
+	if trailer != nil {
+		place(trailer)
+	}
+	header.storeSizeInBytes = nextOffset
 }
 
 // updateSignedRegionTrailer rewrites the signature header's HEADERSIGNATURES region
@@ -773,9 +829,16 @@ func (header *RpmHeader) updateSignedRegionTrailer() {
 
 func (header *RpmHeader) isAtEndOfDataStore(entry IndexEntry) bool {
 
+	trailer := header.regionTrailerEntry()
 	largestEndOffset := uint32(0)
 	lastIdx := -1
-	for idx, e := range header.IndexEntries {
+	for idx := range header.IndexEntries {
+		e := &header.IndexEntries[idx]
+		if e == trailer {
+			// the region trailer always ends the data store, it would hide
+			// the last entry that can actually be grown in place
+			continue
+		}
 		if e.endOffset() > largestEndOffset {
 			largestEndOffset = e.endOffset()
 			lastIdx = idx
@@ -822,7 +885,9 @@ func (header *RpmHeader) SetOrAddIndexEntry(tag TagValue, format FormatType, new
 		existing.offset = newOffset
 		existing.dataItemCnt = newDataItemCnt
 		existing.payload = newPayload
-		header.recalcStoreSize()
+		// the replaced payload almost never has the size of the old one, so every
+		// entry behind it in the data store has to be moved
+		header.syncDataStoreLayout()
 		return
 	}
 	// no existing entry, add new
