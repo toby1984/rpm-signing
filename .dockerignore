@@ -1,0 +1,16 @@
+# Everything the image build does not need. The build context is the project
+# root (docker build -f docker/Dockerfile .).
+.git
+.gitignore
+.idea
+.dockerignore
+bin/
+docker/
+test/
+# Stray RPMs in the project root (docker patterns do not cross '/', so this
+# leaves common/testdata alone; the negation makes that explicit because the
+# unit tests read those fixtures).
+*.rpm
+!common/testdata/*.rpm
+README.md
+run.sh

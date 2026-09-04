@@ -1,0 +1,46 @@
+# Example for building and running the RPM signing server:
+#
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# Expects a 'config' directory next to this file holding the server
+# configuration and the GPG key files it points at:
+#
+#   docker/config/rpm-signing.properties
+#   docker/config/signing-key.pub.gpg.asc
+#   docker/config/signing-key.priv.gpg.asc
+#
+# A minimal rpm-signing.properties (paths are container paths, and both key
+# files must exist or the server refuses to start):
+#
+#   listen_address=:8080
+#   api_signing_token=change-me
+#   gpg_public_key=/config/signing-key.pub.gpg.asc
+#   gpg_private_key=/config/signing-key.priv.gpg.asc
+#   gpg_private_key_password=your-key-password
+#   verbose=true
+#
+# Add 'rpm_sign_client_binary=/usr/local/bin/client' to have GET /clientDownload
+# serve the client binary shipped in the image.
+
+services:
+  rpm-signing-server:
+    image: rpm-signing-server:latest
+    build:
+      # The context is the project root because the Dockerfile copies go.mod and
+      # the source packages from there.
+      context: ..
+      dockerfile: docker/Dockerfile
+      # Version info compiled into the server binary. Compose cannot source
+      # common.sh, so export these before 'up --build' to get a real version:
+      #   export APP_VERSION=$(. ../common.sh && echo $APP_VERSION)
+      #   export GIT_REF=$(git rev-parse --short HEAD)
+      args:
+        APP_VERSION: "${APP_VERSION:-unknown}"
+        GIT_REF: "${GIT_REF:-unknown}"
+    # No command needed: the image entrypoint already passes
+    # -c /config/rpm-signing.properties.
+    volumes:
+      - ./config:/config:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
