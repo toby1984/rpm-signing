@@ -58,6 +58,11 @@ func TestRoundTripNoRewriting(t *testing.T) {
 // of a header got added, removed or replaced: the entry counters agree with the actual
 // entries, the signed region trailer covers all of them, no two entries claim the same
 // data store bytes and the declared data store size matches what Write() would emit.
+//
+// It also checks the invariants rpm itself enforces in hdrblobVerifyInfo(): the index
+// entries are sorted by tag, their data is laid out in that same order without going
+// backwards, every entry is aligned as its format type requires and the region trailer
+// occupies the last bytes of the data store.
 func assertHeaderConsistent(header *RpmHeader, label string, t *testing.T) {
 
 	if int(header.indexEntryCount) != len(header.IndexEntries) {
@@ -78,6 +83,40 @@ func assertHeaderConsistent(header *RpmHeader, label string, t *testing.T) {
 	}
 	if actualSize := uint32(len(dataStore.GetData())); actualSize != header.storeSizeInBytes {
 		t.Errorf("%s: data store holds %d bytes but header declares %d", label, actualSize, header.storeSizeInBytes)
+	}
+
+	trailer := header.regionTrailerEntry()
+	previousTag := uint32(0)
+	previousEnd := uint32(0)
+	for idx := range header.IndexEntries {
+		entry := &header.IndexEntries[idx]
+
+		if idx > 0 && entry.tag <= previousTag {
+			t.Errorf("%s: index entry %d has tag %d but the entry before it has tag %d, entries must be sorted by tag",
+				label, idx, entry.tag, previousTag)
+		}
+		previousTag = entry.tag
+
+		alignment := uint32(FormatType(entry.formatType).GetRequiredAlignment())
+		if entry.offset%alignment != 0 {
+			t.Errorf("%s: entry with tag %d is at offset %d, which is not %d byte aligned",
+				label, entry.tag, entry.offset, alignment)
+		}
+
+		if entry == trailer {
+			// the trailer is the one entry whose data is not in index order,
+			// it has to cover the very end of the data store instead
+			if entry.endOffset() != header.storeSizeInBytes {
+				t.Errorf("%s: region trailer ends at %d but the data store is %d bytes",
+					label, entry.endOffset(), header.storeSizeInBytes)
+			}
+			continue
+		}
+		if entry.offset < previousEnd {
+			t.Errorf("%s: entry with tag %d starts at offset %d, before the previous entry's data ends at %d",
+				label, entry.tag, entry.offset, previousEnd)
+		}
+		previousEnd = entry.endOffset()
 	}
 }
 
@@ -145,7 +184,7 @@ func TestSetOrAddIndexEntryReplaceSameSize(t *testing.T) {
 
 // TestSetOrAddIndexEntryReplaceLargerPayload covers replacing an index entry that is NOT
 // at the end of the data store with a larger payload: the entry cannot grow in place
-// without overwriting the entries behind it and has to be moved instead.
+// without overwriting the entries behind it, so everything behind it has to move up.
 func TestSetOrAddIndexEntryReplaceLargerPayload(t *testing.T) {
 
 	const testData = "testdata/my-payload-package-1.0-1.noarch.rpm"
@@ -163,6 +202,12 @@ func TestSetOrAddIndexEntryReplaceLargerPayload(t *testing.T) {
 	if header.isAtEndOfDataStore(before) {
 		t.Fatalf("Test requires an entry that is not at the end of the data store, got one at offset %d", before.offset)
 	}
+	// the entry the grown payload must not be allowed to overwrite
+	followingTag := SigTagSHA1Header
+	followingBefore := *header.FindIndexEntry(followingTag)
+	if followingBefore.offset < before.offset {
+		t.Fatalf("Test requires an entry behind the one being replaced, tag %d is at offset %d", followingTag.ID(), followingBefore.offset)
+	}
 
 	header.SetOrAddIndexEntry(SigTagRSAHeader, FORMAT_TYPE_BINARY, 2000, make([]byte, 2000))
 
@@ -170,8 +215,10 @@ func TestSetOrAddIndexEntryReplaceLargerPayload(t *testing.T) {
 	if len(after.payload) != 2000 {
 		t.Errorf("Payload was not replaced, expected 2000 bytes, got %d", len(after.payload))
 	}
-	if after.offset == before.offset {
-		t.Errorf("Entry grew in place at offset %d instead of being moved", after.offset)
+	followingAfter := *header.FindIndexEntry(followingTag)
+	if followingAfter.offset < after.endOffset() {
+		t.Errorf("Entry behind the replaced one stayed at offset %d and is overwritten by the payload ending at %d",
+			followingAfter.offset, after.endOffset())
 	}
 	assertHeaderConsistent(header, "replace larger payload", t)
 	assertRoundTrips(rpmFile, payloadReader, "replace larger payload", t)
