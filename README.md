@@ -17,10 +17,15 @@ This is currently very much the MVP and neither performance nor protection from 
 ### HTTP endpoint description
 
 * GET /publickey
+
   Returns an armored GPG keyring containing the GPG public keys of any signing keys the server is using/used to sign RPMs
+  
 * GET /clientDownload
+
   Returns the server's version of the client binary. Will return HTTP Bad Request if the server did not get configured to return the client.
+  
 * POST /sign?authToken=<....token....>
+
   Expects the POST body to be the whole RPM file header up to (but not including) the payload. If the given authentication token is missing or wrong, the server will respond with a HTTP Forbidden.
   Technically one COULD also post the whole RPM file (including the payload) but this is very wasteful and since the server will hold everything in memory, might lead to a DoS when trying to push very large RPMs.
 
