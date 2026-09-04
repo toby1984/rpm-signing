@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -296,14 +297,23 @@ func handleSign(w http.ResponseWriter, r *http.Request, appConfig AppConfig) {
 
 	reader := common.NewIOReaderWithOffset(r.Body)
 
-	initBinaryUncacheableHttpResponse(w)
-	writer := common.NewOffsetTrackingWriter(w)
-	err := signRpmData(reader, writer, appConfig)
+	// the signed data is assembled in memory instead of being streamed straight into the
+	// response because net/http closes the request body as soon as the first response bytes
+	// are flushed, and RpmFile.Write() still reads from that body after writing the headers.
+	// Buffering also keeps a signing failure reportable, as no status code has been sent yet.
+	var signedData bytes.Buffer
+	err := signRpmData(reader, common.NewOffsetTrackingWriter(&signedData), appConfig)
 	if err != nil {
 		// the error is only logged, never returned, as it may disclose server-side file paths
 		common.RootLogger().Errorf("Failed to sign incoming RPM data from %s: %v", r.RemoteAddr, err)
 		http.Error(w, "failed to sign RPM data", http.StatusBadRequest)
 		return
+	}
+
+	initBinaryUncacheableHttpResponse(w)
+	if _, err = w.Write(signedData.Bytes()); err != nil {
+		// too late for an error status, the response body is already being written
+		common.RootLogger().Errorf("Failed to write signed RPM data to %s: %v", r.RemoteAddr, err)
 	}
 }
 

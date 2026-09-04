@@ -141,7 +141,6 @@ type Serializer interface {
 	// writeAlignTo pads the output with zero bytes so that
 	// the given address/offset alignment is achieved
 	writeAlignTo(alignment uint8) error
-	copyRemainingTo(destination Serializer) (uint32, error)
 
 	// misc
 	offset() uint64
@@ -168,47 +167,6 @@ func (s *SerializerImpl) Close() error {
 	}
 	return err2
 }
-func (s *SerializerImpl) copyRemainingTo(destination Serializer) (uint32, error) {
-
-	reader := s.reader
-	writer := destination.GetUnderlyingWriter()
-	buf := make([]byte, 0, 100*1024)
-
-	isEof := func(e error) bool {
-		return e != nil && errors.Is(e, io.EOF)
-	}
-
-	bytesWritten := uint32(0)
-	var bytesRead, written int
-	var readErr error
-	var writeErr error
-	for {
-		bytesRead, readErr = reader.Read(buf)
-		if bytesRead > 0 {
-			written, writeErr = writer.Write(buf[:bytesRead])
-			bytesWritten += uint32(written)
-			if writeErr != nil {
-				if readErr != nil && !isEof(readErr) {
-					return bytesWritten, readErr
-				}
-				return bytesWritten, writeErr
-			}
-			if readErr != nil && !isEof(readErr) {
-				return bytesWritten, readErr
-			}
-			if written != bytesRead {
-				return bytesWritten, io.ErrShortWrite
-			}
-		} else {
-			// zero bytes read
-			if isEof(readErr) {
-				return bytesWritten, nil
-			}
-			return bytesWritten, readErr
-		}
-	}
-}
-
 func (s *SerializerImpl) GetUnderlyingWriter() io.Writer {
 	return s.writer
 }
