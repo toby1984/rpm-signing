@@ -67,14 +67,13 @@ func (v *SignatureVerifierImpl) VerifySignatures(toVerify Set[SignatureVersion])
 
 func (v *SignatureVerifierImpl) VerifyV3Signature() error {
 
+	// a V3 signature covers the main header AND the payload, RSA keys store it in
+	// RPMSIGTAG_PGP (tag 1002) and DSA keys in RPMSIGTAG_GPG (tag 1005). The RPM
+	// toolchain only ever writes one of the two, depending on the signing key's type
 	pgpTag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagPGP)
-	if pgpTag == nil {
-		return errors.New("Signature header does not contain a RPMSIGTAG_PGP tag")
-	}
-
 	dsaTag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagGPG)
-	if dsaTag == nil {
-		return errors.New("Signature header does not contain a RPMSIGTAG_GPG tag")
+	if pgpTag == nil && dsaTag == nil {
+		return errors.New("Signature header contains neither a RPMSIGTAG_PGP nor a RPMSIGTAG_GPG tag")
 	}
 
 	md5Tag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagMD5)
@@ -114,15 +113,17 @@ func (v *SignatureVerifierImpl) VerifyV3Signature() error {
 	}
 
 	// verify RPMSIGTAG_PGP
-	_, err = VerifySignature(v.gpgPublicKeys, combined, pgpTag.payload)
-	if err != nil {
-		return errors.New("RPMSIGTAG_PGP verification failure")
+	if pgpTag != nil {
+		if _, err = VerifySignature(v.gpgPublicKeys, combined, pgpTag.payload); err != nil {
+			return errors.New("RPMSIGTAG_PGP verification failure")
+		}
 	}
 
 	// verify RPMSIGTAG_GPG
-	_, err = VerifySignature(v.gpgPublicKeys, combined, dsaTag.payload)
-	if err != nil {
-		return errors.New("RPMSIGTAG_GPG verification failure")
+	if dsaTag != nil {
+		if _, err = VerifySignature(v.gpgPublicKeys, combined, dsaTag.payload); err != nil {
+			return errors.New("RPMSIGTAG_GPG verification failure")
+		}
 	}
 
 	return nil
@@ -155,8 +156,6 @@ func (v *SignatureVerifierImpl) VerifyV4Signature() error {
 		return errors.New("Signature header contains neither a SigTagRSAHeader nor a SigTagDSAHeader tag")
 	}
 
-	dsaTag := v.rpmFile.SignatureHeader.FindIndexEntry(SigTagGPG)
-
 	if err := v.mainHeaderData.Rewind(); err != nil {
 		return err
 	}
@@ -182,13 +181,9 @@ func (v *SignatureVerifierImpl) VerifyV4Signature() error {
 		}
 	}
 
-	// verify RPMSIGTAG_GPG
-	if dsaTag != nil {
-		_, err = VerifySignature(v.gpgPublicKeys, headerData, dsaTag.payload)
-		if err != nil {
-			return err
-		}
-	}
+	// NOTE: RPMSIGTAG_GPG (tag 1005) is deliberately NOT verified here. It holds a V3
+	//       signature covering main header AND payload, so it cannot validate against
+	//       the main header alone - VerifyV3Signature() is what checks it
 	return nil
 
 	/*
@@ -352,6 +347,27 @@ In v3, the Signature tags severely clashed with the main Header tags, and all si
 Unlike v4 and v6, v3 did not utilize a formal reserved space tag; padding was simply calculated to an 8-byte boundary, making signing v3 packages a heavy I/O operation because the entire payload often had to be rewritten.
 */
 
+// CreateDestinationFile creates the given file for writing, refusing to clobber
+// an already existing file unless overwriteDestinationFile is true.
+func CreateDestinationFile(destinationFileName string, overwriteDestinationFile bool) (*os.File, error) {
+
+	_, err := os.Stat(destinationFileName)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to stat() destination file %s. Error: %s", destinationFileName, err.Error())
+		}
+		// ok, file does not exist
+	} else if !overwriteDestinationFile {
+		// no error -> file exists
+		return nil, fmt.Errorf("refusing to overwrite destination file %s. Use -f or --overwrite to avoid this error", destinationFileName)
+	}
+	destinationFile, err := os.Create(destinationFileName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create destination file %s. Error: %s", destinationFileName, err.Error())
+	}
+	return destinationFile, nil
+}
+
 func SignRpmAndWriteToFile(rpmFile RpmFile,
 	payloadReader ReaderWithOffset,
 	destinationFileName string,
@@ -359,21 +375,9 @@ func SignRpmAndWriteToFile(rpmFile RpmFile,
 	privateKey packet.PrivateKey,
 	verboseOutput bool) error {
 
-	var err error
-
-	_, err = os.Stat(destinationFileName)
+	destinationFile, err := CreateDestinationFile(destinationFileName, overwriteDestinationFile)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("failed to stat() destination file %s. Error: %s", destinationFileName, err.Error())
-		}
-		// ok, file does not exist
-	} else if !overwriteDestinationFile {
-		// no error -> file exists
-		return fmt.Errorf("refusing to overwrite destination file %s. Use -f or --overwrite to avoid this error", destinationFileName)
-	}
-	var destinationFile *os.File
-	if destinationFile, err = os.Create(destinationFileName); err != nil {
-		return fmt.Errorf("failed to create destination file %s. Error: %s", destinationFileName, err.Error())
+		return err
 	}
 	writer := NewFileWriterWithOffset(destinationFile)
 	err = SignRpmAndWrite(rpmFile, writer, payloadReader, privateKey, verboseOutput)

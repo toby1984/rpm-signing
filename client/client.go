@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"rpm-signing/common"
 	"strings"
@@ -17,7 +18,8 @@ func printHelpAndExit(errorMessage ...string) {
 	}
 
 	fmt.Printf("Usage: [--version] [-v|--verbose] [--dump|--dump-main-hdr|--dump-sig-hdr] [-i|--info] [--verify] [-d|--debug] [-s|--sign] [-f|--overwrite] " +
-		"[--priv-key <GPG private key file>] [--priv-key-password <password>] [--pub-key <GPG public key file OR directory>] [ [-o|--output-file <RPM FILE>] <RPM file>")
+		"[--priv-key <GPG private key file>] [--priv-key-password <password>] [--pub-key <GPG public key file OR directory>] " +
+		"[--sign-server <sign server base URL>] [--sign-server-token <token>] [-o|--output-file <RPM FILE>] <RPM file>")
 	fmt.Println()
 	os.Exit(1)
 }
@@ -41,6 +43,9 @@ func main() {
 	var privateKeyFilename string
 	var privateKeyPassphrase []byte
 	var gpgPublicFiles []string
+
+	var signServerUrl = ""
+	var signServerToken = ""
 
 	var overwriteDestinationFile = false
 	var destinationFileName = ""
@@ -92,6 +97,20 @@ func main() {
 				printHelpAndExit("More than one --priv-key option provided")
 			}
 			privateKeyFilename = onlyArgs[idx]
+		} else if arg == "--sign-server" {
+			if (idx + 1) >= len(onlyArgs) {
+				printHelpAndExit(arg + " option requires an argument")
+			}
+			failIfNotUnique(arg)
+			idx++
+			signServerUrl = onlyArgs[idx]
+		} else if arg == "--sign-server-token" {
+			if (idx + 1) >= len(onlyArgs) {
+				printHelpAndExit(arg + " option requires an argument")
+			}
+			failIfNotUnique(arg)
+			idx++
+			signServerToken = onlyArgs[idx]
 		} else if arg == "-f" || arg == "--overwrite" {
 			failIfNotUnique(arg)
 			overwriteDestinationFile = true
@@ -143,6 +162,18 @@ func main() {
 		printHelpAndExit("Expected exactly one RPM file name but got " + strings.Join(remainingArgs, ", "))
 	}
 
+	if seenOpts.Contains("--sign-server-token") && len(signServerUrl) == 0 {
+		printHelpAndExit("--sign-server-token requires --sign-server")
+	}
+	if len(signServerUrl) > 0 {
+		if !signRpm {
+			printHelpAndExit("--sign-server can only be used together with -s/--sign")
+		}
+		if len(privateKeyFilename) > 0 || privateKeyPassphrase != nil {
+			printHelpAndExit("--sign-server is mutually exclusive with --priv-key/--priv-key-password")
+		}
+	}
+
 	rpmFilePath := remainingArgs[0]
 
 	if verboseOutput {
@@ -154,7 +185,16 @@ func main() {
 		printErrorAndExit(fmt.Sprintf("Failed read RPM file from %s. Error: %s", rpmFilePath, err))
 	}
 
-	rpmFileReader := common.NewIOReaderWithOffset(r)
+	// when signing remotely, the RPM header is the POST body, so capture it
+	// while the parser below reads it anyway
+	var headerCapture *headerCapturingReader
+	var rpmSource io.Reader = r
+	if len(signServerUrl) > 0 {
+		headerCapture = newHeaderCapturingReader(r)
+		rpmSource = headerCapture
+	}
+
+	rpmFileReader := common.NewIOReaderWithOffset(rpmSource)
 	defer common.CloseQuietly(rpmFileReader)
 
 	// NOTE: _NEVER_ perform signature validation here because
@@ -166,6 +206,12 @@ func main() {
 	if err != nil {
 		printErrorAndExit("Error during RPM file reading, error: " + err.Error())
 		return // unreachable, make compiler happy
+	}
+
+	// the parser stopped right at the first payload byte, so the captured
+	// bytes are now exactly the RPM header and nothing more
+	if headerCapture != nil {
+		headerCapture.StopCapturing()
 	}
 
 	if printInfo {
@@ -231,14 +277,17 @@ func main() {
 		// as those sign both the main header AND the payload
 		var payloadReader common.SeekableReader
 		if rpmFile.GetSignatureVersions().Contains(common.SIGNATURE_VERSION_V3) {
-			payloadReader, err := common.OpenFileOrUrl(rpmFilePath)
+			// NOTE: plain '=' and not ':=' , otherwise payloadReader would only be
+			//       assigned inside this block and stay nil for the verifier below
+			payloadReader, err = common.OpenFileOrUrl(rpmFilePath)
 			if err != nil {
 				printErrorAndExit(fmt.Sprintf("Failed to open RPM file %s. Error: %s", rpmFilePath, err.Error()))
 				return // unreachable, make compiler happy
 			}
 			defer common.CloseQuietly(payloadReader)
 
-			cnt, err := payloadReader.Seek(int64(rpmFile.PayloadStartOffset), 0)
+			var cnt int64
+			cnt, err = payloadReader.Seek(int64(rpmFile.PayloadStartOffset), 0)
 			if err != nil {
 				printErrorAndExit(fmt.Sprintf("Failed to seek() RPM file %s. Error: %s", rpmFilePath, err.Error()))
 			}
@@ -278,21 +327,34 @@ func main() {
 
 	if signRpm {
 
-		if len(privateKeyFilename) == 0 {
-			printHelpAndExit("Cannot --sign without --priv-key")
-		}
-
 		if len(destinationFileName) <= 0 {
 			printHelpAndExit(fmt.Sprintf("Cannot sign RPM without -o/--output-file"))
 		}
 
-		privateKey, err := common.LoadPrivateKeyFromFile(privateKeyFilename, privateKeyPassphrase)
-		if err != nil {
-			printHelpAndExit(fmt.Sprintf("Failed to load private key from %s: %v", privateKeyFilename, err))
-		}
+		if len(signServerUrl) > 0 {
 
-		if err = common.SignRpmAndWriteToFile(rpmFile, rpmFileReader, destinationFileName, overwriteDestinationFile, privateKey, verboseOutput); err != nil {
-			printErrorAndExit(fmt.Sprintf("Failed to sign RPM file %s. Error: %v", destinationFileName, err))
+			if verboseOutput {
+				common.RootLogger().Infof("Sending %d bytes of RPM header to sign server %s", len(headerCapture.Bytes()), signServerUrl)
+			}
+
+			if err = signRpmRemotely(signServerUrl, signServerToken, headerCapture.Bytes(), rpmFileReader,
+				destinationFileName, overwriteDestinationFile); err != nil {
+				printErrorAndExit(fmt.Sprintf("Failed to sign RPM file %s. Error: %v", destinationFileName, err))
+			}
+		} else {
+
+			if len(privateKeyFilename) == 0 {
+				printHelpAndExit("Cannot --sign without --priv-key")
+			}
+
+			privateKey, err := common.LoadPrivateKeyFromFile(privateKeyFilename, privateKeyPassphrase)
+			if err != nil {
+				printHelpAndExit(fmt.Sprintf("Failed to load private key from %s: %v", privateKeyFilename, err))
+			}
+
+			if err = common.SignRpmAndWriteToFile(rpmFile, rpmFileReader, destinationFileName, overwriteDestinationFile, privateKey, verboseOutput); err != nil {
+				printErrorAndExit(fmt.Sprintf("Failed to sign RPM file %s. Error: %v", destinationFileName, err))
+			}
 		}
 		common.RootLogger().Infof("Wrote signed file to %s", destinationFileName)
 	}
