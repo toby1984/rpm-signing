@@ -51,9 +51,11 @@ func (h *headerCapturingReader) Bytes() []byte {
 	return h.buf.Bytes()
 }
 
-// signUrl turns the sign server's base URL into the full /sign endpoint URL.
+// createSigningUrl turns the sign server's base URL into the full /sign endpoint URL
+// by appending the path (ONLY if no path is already present) and the given
+// authToken.
 // The authToken query parameter is always sent, with an empty value if no token was given.
-func signUrl(serverBaseUrl string, authToken string) (string, error) {
+func createSigningUrl(serverBaseUrl string, authToken string) (string, error) {
 
 	parsed, err := url.Parse(serverBaseUrl)
 	if err != nil {
@@ -62,7 +64,9 @@ func signUrl(serverBaseUrl string, authToken string) (string, error) {
 	if len(parsed.Host) == 0 {
 		return "", fmt.Errorf("not a valid sign server URL '%s': missing host", serverBaseUrl)
 	}
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/sign"
+	if len(parsed.Path) == 0 {
+		parsed.Path = strings.TrimSuffix(parsed.Path, "/") + common.SignRpmHeader
+	}
 	parsed.RawQuery = url.Values{"authToken": {authToken}}.Encode()
 	return parsed.String(), nil
 }
@@ -78,7 +82,7 @@ func signRpmRemotely(serverBaseUrl string,
 	destinationFileName string,
 	overwriteDestinationFile bool) error {
 
-	endpointUrl, err := signUrl(serverBaseUrl, authToken)
+	endpointUrl, err := createSigningUrl(serverBaseUrl, authToken)
 	if err != nil {
 		return err
 	}

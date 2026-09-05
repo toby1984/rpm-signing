@@ -19,8 +19,14 @@ LDFLAGS := -X rpm-signing/common.AppVersion=$(APP_VERSION) -X rpm-signing/common
 # Default target runs code quality checks and builds both binaries
 all: fmt vet build test
 
+all-stripped: fmt vet build test
+    LDFLAGS += -s -w
+
 # Build both client and server
 build: client server
+
+build-stripped: client server
+    LDFLAGS += -s -w
 
 # Build client binary
 client:

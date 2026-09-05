@@ -284,8 +284,17 @@ func handlePublicKey(w http.ResponseWriter, appConfig AppConfig) {
 	}
 }
 
+// handleSignRpmHeader receives arbitrary data and
+// returns an ASCII-armoreed GPG detached signature
+// of that data (suitable for signing RPM
+// repository metadata for example)
+func handleSignDetached(w http.ResponseWriter, r *http.Request, appConfig AppConfig) {
+	// FIXME: Implement me
+	panic("not implemented")
+}
+
 // handleSign serves POST /sign and returns the request body signed with the application's GPG private key
-func handleSign(w http.ResponseWriter, r *http.Request, appConfig AppConfig) {
+func handleSignRpmHeader(w http.ResponseWriter, r *http.Request, appConfig AppConfig) {
 
 	// constant-time comparison because the token is a shared secret
 	token := r.URL.Query().Get("authToken")
@@ -351,13 +360,16 @@ func startHttpServer(appConfig AppConfig) error {
 
 	// method-aware patterns: the mux itself answers 405 for a wrong method
 	// on a known path and 404 for any other URL
-	mux.HandleFunc("GET /publickey", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+common.PubKeyDownloadEndpoint, func(w http.ResponseWriter, r *http.Request) {
 		handlePublicKey(w, appConfig)
 	})
-	mux.HandleFunc("POST /sign", func(w http.ResponseWriter, r *http.Request) {
-		handleSign(w, r, appConfig)
+	mux.HandleFunc("POST "+common.SignRpmHeader, func(w http.ResponseWriter, r *http.Request) {
+		handleSignRpmHeader(w, r, appConfig)
 	})
-	mux.HandleFunc("GET /clientDownload", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+common.SignDetached, func(w http.ResponseWriter, r *http.Request) {
+		handleSignDetached(w, r, appConfig)
+	})
+	mux.HandleFunc("GET "+common.ClientDownloadEndpoint, func(w http.ResponseWriter, r *http.Request) {
 		handleClientDownload(w, r, appConfig)
 	})
 

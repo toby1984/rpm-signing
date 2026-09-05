@@ -729,9 +729,13 @@ func (header *RpmHeader) addIndexEntry(newEntry IndexEntry) {
 // in the first slot, as its tag is the lowest one a header can carry.
 func (header *RpmHeader) insertIndexEntry(newEntry IndexEntry) {
 
-	// linear scan rather than a binary search: headers carry few entries and a
-	// header that was written by a tool that did not sort them must not throw
-	// this off any further
+	// CAREFUL: The following requirements are not mentioned anywhere in the RPM file format
+	// "documentation" but enforced by the RPM tool code, causing errors when violated:
+	//
+	// - index entries need to be sorted ascending by tag number
+	// - the order of payload entries in the datastore section needs to be
+	//   in sync with the order of index entries within the index table
+
 	insertAt := len(header.IndexEntries)
 	for idx := range header.IndexEntries {
 		if header.IndexEntries[idx].tag > newEntry.tag {

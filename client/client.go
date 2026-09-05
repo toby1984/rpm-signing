@@ -331,7 +331,7 @@ func main() {
 			printHelpAndExit(fmt.Sprintf("Cannot sign RPM without -o/--output-file"))
 		}
 
-		if len(signServerUrl) > 0 {
+		if headerCapture != nil {
 
 			if verboseOutput {
 				common.RootLogger().Infof("Sending %d bytes of RPM header to sign server %s", len(headerCapture.Bytes()), signServerUrl)
