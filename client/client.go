@@ -61,7 +61,7 @@ func main() {
 	seenOpts := common.NewSet[string]()
 	failIfNotUnique := func(opt string) {
 		if seenOpts.Contains(opt) {
-			printHelpAndExit(fmt.Sprintf("CLI option %s is unique but was used more than once", opt))
+			printHelpAndExit(fmt.Sprintf("CLI option %s most not appear more than once", opt))
 		}
 		seenOpts.Add(opt)
 	}
@@ -259,7 +259,7 @@ func main() {
 
 			var additionalPublicKeys openpgp.EntityList
 			if isDir {
-				fileNames, err := common.ListMatchingFiles([]string{file}, ".*key.*")
+				fileNames, err := common.ListMatchingFiles([]string{file}, ".*")
 				if err != nil {
 					printErrorAndExit(fmt.Sprintf("Failed to load GPG public key from %s. Error: %s", gpgPublicFiles, err))
 				}
