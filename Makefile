@@ -16,17 +16,19 @@ APP_VERSION := $(shell . ./common.sh && echo $$APP_VERSION)
 GIT_REF := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X rpm-signing/common.AppVersion=$(APP_VERSION) -X rpm-signing/common.GitRef=$(GIT_REF)
 
+# Target-specific variable assignments
+all-stripped: LDFLAGS += -s -w
+build-stripped: LDFLAGS += -s -w
+
 # Default target runs code quality checks and builds both binaries
 all: fmt vet build test
 
 all-stripped: fmt vet build test
-    LDFLAGS += -s -w
 
 # Build both client and server
 build: client server
 
 build-stripped: client server
-    LDFLAGS += -s -w
 
 # Build client binary
 client:
