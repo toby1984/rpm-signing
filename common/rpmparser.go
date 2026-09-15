@@ -1044,10 +1044,15 @@ func (lead *RpmLead) GetPackageName() string {
 func validateDigests(rpm RpmFile, payloadMd5HasBeenCalculated bool) {
 
 	/*
-		All packages carry at least HEADERSIGNATURES, (LONG)SIZE, MD5 and SHA1, and since rpm >= 4.14, SHA256 tags.
+		All packages carry at least HEADERSIGNATURES, (LONG)SIZE, a digest (MD5/SHA1/SHA256), and since rpm >= 4.14, SHA256 tags.
 	*/
 	if rpm.SignatureHeader.SignedRegion == nil {
 		panic("Signature header contained no signed/immutable region marker?")
+	}
+
+	if rpm.GetFileFormatVersion().Major > 4 {
+		// FIXME: Add support for RPM V6 once support for it gets more widespread
+		panic(fmt.Sprintf("Sorry, RPM file format version %s is currently unsupported", rpm.GetFileFormatVersion().String()))
 	}
 
 	actualEntries := len(rpm.SignatureHeader.IndexEntries)
@@ -1058,12 +1063,16 @@ func validateDigests(rpm RpmFile, payloadMd5HasBeenCalculated bool) {
 	}
 	RootLogger().Debugf("Signature covers %d index entries and %d bytes of data", signedEntries, rpm.SignatureHeader.SignedRegion.Length)
 
-	var err error
-	md5Header := rpm.SignatureHeader.FindIndexEntry(SigTagMD5) // tag 1004, binary
 	var sha1HashValue []byte
 	var sha256HashValue []byte
 	var sha1Header *IndexEntry
 	var sha256Header *IndexEntry
+	var md5Header *IndexEntry
+	var err error
+
+	if md5Header = rpm.SignatureHeader.FindIndexEntry(SigTagMD5); md5Header == nil { // tag 1004, binary
+		md5Header = rpm.SignatureHeader.FindIndexEntry(SigTagSigMD5) // tag 261, binary
+	}
 
 	if sha1Header = rpm.SignatureHeader.FindIndexEntry(SigTagSHA1Header); sha1Header != nil { // tag 269, STRING
 		sha1HashValue, err = hex.DecodeString(sha1Header.StringValue())
@@ -1071,20 +1080,19 @@ func validateDigests(rpm RpmFile, payloadMd5HasBeenCalculated bool) {
 			panic("Failed to hex-decode SHA1 hash?")
 		}
 	}
+
 	if sha256Header = rpm.SignatureHeader.FindIndexEntry(SigTagSHA256Header); sha256Header != nil { // tag 273, STRING
 		sha256HashValue, err = hex.DecodeString(sha256Header.StringValue())
 		if err != nil {
 			panic("Failed to hex-decode SHA256 hash?")
 		}
 	}
-	if md5Header == nil {
-		panic("Invalid RPM file - no MD5 digest?")
-	} else if payloadMd5HasBeenCalculated && !bytes.Equal(md5Header.payload, rpm.MainHeader.GetMd5Digest()) {
+
+	if md5Header != nil && payloadMd5HasBeenCalculated && !bytes.Equal(md5Header.payload, rpm.MainHeader.GetMd5Digest()) {
 		panic(fmt.Sprintf("MD5 checksum validation failed, expected %s but got %s", hex.Dump(md5Header.payload), hex.Dump(rpm.MainHeader.GetMd5Digest())))
 	}
-	if sha1Header == nil {
-		panic("Invalid RPM file - no SHA1 digest?")
-	} else if !bytes.Equal(sha1HashValue, rpm.MainHeader.GetSha1Digest()) {
+
+	if sha1Header != nil && !bytes.Equal(sha1HashValue, rpm.MainHeader.GetSha1Digest()) {
 		expected := hex.Dump(sha1HashValue)
 		actualBytes := rpm.MainHeader.GetSha1Digest()
 		actual := hex.Dump(actualBytes)
@@ -1092,8 +1100,13 @@ func validateDigests(rpm RpmFile, payloadMd5HasBeenCalculated bool) {
 			expected,
 			actual))
 	}
+
 	if sha256Header != nil && !bytes.Equal(sha256HashValue, rpm.MainHeader.GetSha256Digest()) {
 		panic(fmt.Sprintf("SHA256 checksum validation failed, expected %s but got %s", hex.Dump(sha256Header.payload), hex.Dump(rpm.MainHeader.GetSha256Digest())))
+	}
+
+	if md5Header == nil && sha1Header == nil && sha256Header == nil {
+		panic(fmt.Sprintf("failed to find any recognized digest (MD5 / SHA1 / SHA256) inside signature header:\n%s", rpm.SignatureHeader.DumpIndexEntries(25, true)))
 	}
 
 	// Inside an RPM package file, the **Signature Header** uses the standard RPM header data structure to store cryptographic digests, signatures, and size parameters.
@@ -1416,9 +1429,19 @@ func (f *RpmFile) GetRpmVersion() string {
 	return index.StringValue()
 }
 
-// GetFileFormatVersion returns the RPM file format
-// as given in the file's header.
+// GetFileFormatVersion returns the RPM file format, trying to
+// use main header tag 5114 (RPMFORMAT) and falling back to
+// using the major/minor version from the file's lead section.
 func (f *RpmFile) GetFileFormatVersion() RpmFileFormatVersion {
+
+	entry := f.MainHeader.FindIndexEntry(TagRpmformat)
+	if entry != nil {
+		// int32 version number
+		return RpmFileFormatVersion{
+			Major: uint8(entry.Int32Value()),
+			Minor: 0,
+		}
+	}
 	return RpmFileFormatVersion{
 		Major: f.Lead.Major,
 		Minor: f.Lead.Minor,
