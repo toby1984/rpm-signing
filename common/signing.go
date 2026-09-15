@@ -406,7 +406,7 @@ func SignRpm(rpmFile *RpmFile, privateKey packet.PrivateKey) error {
 
 	keyType := GetKeyType(privateKey)
 
-	// Sign digest
+	// Sign RPM file header ONLY (RPM >= V4 signature)
 	openPgpPacketData, err := SignDigest(rpmFile.MainHeader.Sha256Digest, &privateKey)
 	if err != nil {
 		return fmt.Errorf("failed to load sign digest: " + err.Error())
@@ -427,6 +427,13 @@ func SignRpm(rpmFile *RpmFile, privateKey packet.PrivateKey) error {
 		// FIXME: Implement RPM V6 support
 		return fmt.Errorf("sorry, only private keys of type RSA or DSA are supported for signing")
 	}
+	// make sure to delete any legacy RPM V3 signatures before signing.
+	// we cannot re-calculate those without reading the whole RPM payload
+	// and the whole point of this tool is to NOT require the payload
+	// for signing
+	rpmFile.SignatureHeader.DeleteIndexEntryIfExists(SigTagPGP)
+	rpmFile.SignatureHeader.DeleteIndexEntryIfExists(SigTagPGP5)
+	rpmFile.SignatureHeader.DeleteIndexEntryIfExists(SigTagGPG)
 
 	newEntrySize := uint32(len(openPgpPacketData))
 	rpmFile.SignatureHeader.SetOrAddIndexEntry(newEntryTag, FORMAT_TYPE_BINARY, newEntrySize, openPgpPacketData)
